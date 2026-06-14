@@ -2,48 +2,60 @@ name: Sync Fork and Notify Discord
 
 on:
   schedule:
-    # يعمل السكربت تلقائياً كل ساعة لفحص وجود تحديثات في المستودع الأصلي
-    - cron: '0 * * * *'
-  workflow_dispatch: # يتيح لك تشغيل السكربت يدوياً في أي وقت للتجربة
+    - cron: '0 * * * *' # يعمل كل ساعة تلقائياً
+  workflow_dispatch: # للتشغيل اليدوي
 
 jobs:
   sync-and-notify:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # إعطاء صلاحية الكتابة للمستودع بشكل صريح
     steps:
-      # 1. عمل Clone للمستودع الخاص بك
+      # تعديل جوهري: تحميل آخر تعديل فقط لتوفير الوقت والبيانات (يستغرق ثانيتين فقط)
       - name: Checkout Your Fork
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0
+          fetch-depth: 1 
 
-      # 2. ربط المستودع الأصلي كـ Upstream وسحب التحديثات منه
-      - name: Sync with Upstream
-        id: sync
+      - name: Fetch Upstream Data
+        id: check_changes
+        run: |
+          # تنزيل الملفات الحديثة مباشرة من الـ Raw الخاص بالمستودع الأصلي للمقارنة الفورية
+          mkdir -p upstream_data
+          curl -s https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/hackerone_data.json > upstream_data/hackerone_data.json
+          curl -s https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data/bugcrowd_data.json > upstream_data/bugcrowd_data.json
+          
+          # التحقق هل هناك اختلاف عن الملف الحالي عندك؟
+          if [ -f data/hackerone_data.json ]; then
+            if cmp -s data/hackerone_data.json upstream_data/hackerone_data.json && cmp -s data/bugcrowd_data.json upstream_data/bugcrowd_data.json; then
+              echo "CHANGED=false" >> $GITHUB_ENV
+              echo "لا توجد تحديثات جديدة."
+            else
+              echo "CHANGED=true" >> $GITHUB_ENV
+              echo "توجد تحديثات جديدة للبرامج!"
+              mkdir -p data
+              cp upstream_data/*.json data/ 2>/dev/null || true
+            fi
+          else
+            # إذا كانت أول مرة يعمل فيها السكربت والملفات غير موجودة
+            echo "CHANGED=true" >> $GITHUB_ENV
+            mkdir -p data
+            cp upstream_data/*.json data/ 2>/dev/null || true
+          fi
+
+      - name: Commit and Push Changes
+        if: env.CHANGED == 'true'
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          
-          # إضافة المستودع الأصلي لـ arkadiyt
-          git remote add upstream https://github.com/arkadiyt/bounty-targets-data.git
-          git fetch upstream main
-          
-          # التحقق من وجود اختلافات قبل المزامنة
-          if git diff --quiet HEAD upstream/main; then
-            echo "CHANGED=false" >> $GITHUB_ENV
-            echo "لا توجد تحديثات جديدة حالياً."
-          else
-            echo "CHANGED=true" >> $GITHUB_ENV
-            # دمج التحديثات الجديدة في مستودعك
-            git merge upstream/main --allow-unrelated-histories -m "Sync with upstream"
-            git push origin main
-            echo "تم تحديث البيانات بنجاح!"
-          fi
+          git add data/*.json
+          git commit -m "Update bounty targets data [skip ci]" || echo "No changes to commit"
+          git push origin main
 
-      # 3. إرسال تنبيه لديسكورد في حال وجود شركات جديدة فقط
       - name: Send Discord Notification
         if: env.CHANGED == 'true'
         run: |
           curl -H "Content-Type: application/json" \
                -X POST \
-               -d "{\"content\": \"🚀 **تحديث جديد ولحظي في برامج الـ Bug Bounty!**\\nتم سحب بيانات برامج جديدة أو تحديث الـ Scope من المستودع الأصلي تلقائياً. تفقد المنصات الآن لاقتناص الثغرات قبل الجميع! 🎯\"}" \
+               -d "{\"content\": \"🚀 **تحديث جديد ولحظي في برامج الـ Bug Bounty!**\\nتم رصد أهداف جديدة أو تحديث في الـ Scope. تفقد حسابك والمنصات الآن لاقتناص الفرصة! 🎯\"}" \
                ${{ secrets.DISCORD_WEBHOOK }}
