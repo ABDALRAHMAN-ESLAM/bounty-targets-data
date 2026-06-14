@@ -23,17 +23,19 @@ jobs:
 
       - name: Fetch and Analyze Changes
         id: analyze
+        shell: python # هنا الإصلاح الضروري ليتم تشغيل الكود كـ Python وليس Bash
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }}
+          GITHUB_ENV: ${{ github.env }}
         run: |
           import json
           import os
           import urllib.request
-          import subprocess
-
+          
           def fetch_json(url):
               try:
-                  with urllib.request.urlopen(url) as response:
+                  req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                  with urllib.request.urlopen(req) as response:
                       return json.loads(response.read().decode())
               except Exception as e:
                   print(f"Error fetching {url}: {e}")
@@ -47,18 +49,19 @@ jobs:
           new_bc = fetch_json(bc_url)
 
           # قراءة البيانات القديمة المخزنة عندك
-          old_h1 = []
-          old_bc = []
+          old_h1_targets = set()
+          old_bc_targets = set()
+          
           if os.path.exists('data/hackerone_data.json'):
-              with open('data/hackerone_data.json', 'r') as f:
-                  old_h1 = json.load(f)
+              try:
+                  with open('data/hackerone_data.json', 'r') as f:
+                      old_h1_targets = {t['name'] for t in json.load(f)}
+              except: pass
           if os.path.exists('data/bugcrowd_data.json'):
-              with open('data/bugcrowd_data.json', 'r') as f:
-                  old_bc = json.load(f)
-
-          # استخراج الأسماء القديمة للمقارنة
-          old_h1_targets = {t['name'] for t in old_h1} if old_h1 else set()
-          old_bc_targets = {t['name'] for t in old_bc} if old_bc else set()
+              try:
+                  with open('data/bugcrowd_data.json', 'r') as f:
+                      old_bc_targets = {t['name'] for t in json.load(f)}
+              except: pass
 
           new_targets = []
 
@@ -66,43 +69,48 @@ jobs:
           if new_h1:
               for target in new_h1:
                   if target['name'] not in old_h1_targets:
-                      new_targets.append(f"🔹 **{target['name']}** (HackerOne) - [الرابط]({target.get('url', '#')})")
+                      url = target.get('url', '#')
+                      new_targets.append(f"🔹 **{target['name']}** (HackerOne) - [الرابط]({url})")
 
           # فحص Bugcrowd
           if new_bc:
               for target in new_bc:
                   if target['name'] not in old_bc_targets:
-                      new_targets.append(f"🔸 **{target['name']}** (Bugcrowd) - [الرابط]({target.get('url', '#')})")
+                      url = target.get('url', '#')
+                      new_targets.append(f"🔸 **{target['name']}** (Bugcrowd) - [الرابط]({url})")
 
-          if new_targets:
-              print("Found new targets!")
-              # حفظ الملفات الجديدة للاستخدام القادم
+          # إذا وجدنا أهداف جديدة أو كانت هذه أول مرة يعمل فيها السكربت تماماً والملفات فارغة
+          if new_targets or not os.path.exists('data/hackerone_data.json'):
+              print(f"Found {len(new_targets)} new targets!")
               os.makedirs('data', exist_ok=True)
-              with open('data/hackerone_data.json', 'w') as f:
-                  json.dump(new_h1, f)
-              with open('data/bugcrowd_data.json', 'w') as f:
-                  json.dump(new_bc, f)
+              if new_h1:
+                  with open('data/hackerone_data.json', 'w') as f: json.dump(new_h1, f)
+              if new_bc:
+                  with open('data/bugcrowd_data.json', 'w') as f: json.dump(new_bc, f)
               
-              # إعداد رسالة ديسكورد
-              targets_str = "\\n".join(new_targets[:10]) # عرض أول 10 برامج جديدة كحد أقصى لحجم الرسالة
-              payload = {
-                  "content": f"🚀 **رادار الـ Bug Bounty رصد برامج جديدة مضافة الآن!**\\n\\n{targets_str}\\n\\n🎯 تفقد الأهداف السابقة وابدأ الفحص فوراً لمنع الـ Duplicate!"
-              }
+              # أرسل فقط إذا كانت هناك أهداف فعلية جديدة لمنع إشعار أول تشغيل الفارغ
+              if new_targets:
+                  targets_str = "\\n".join(new_targets[:10])
+                  payload = {
+                      "content": f"🚀 **رادار الـ Bug Bounty رصد برامج جديدة مضافة الآن!**\\n\\n{targets_str}\\n\\n🎯 تفقد النطاقات وابدأ الفحص فوراً لاقتناص الفرصة!"
+                  }
+                  
+                  try:
+                      req = urllib.request.Request(
+                          os.environ['DISCORD_WEBHOOK_URL'],
+                          data=json.dumps(payload).encode('utf-8'),
+                          headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'}
+                      )
+                      urllib.request.urlopen(req)
+                  except Exception as e:
+                      print(f"Discord error: {e}")
               
-              req = urllib.request.Request(
-                  os.environ['DISCORD_WEBHOOK_URL'],
-                  data=json.dumps(payload).encode('utf-8'),
-                  headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'}
-              )
-              urllib.request.urlopen(req)
-              
-              # إخبار الـ GitHub Action بأن هناك تغيير ليقوم بعمل Commit
               with open(os.environ['GITHUB_ENV'], 'a') as ge:
-                  ge.write("CHANGED=true\\n")
+                  ge.write("CHANGED=true\n")
           else:
               print("No new targets found.")
               with open(os.environ['GITHUB_ENV'], 'a') as ge:
-                  ge.write("CHANGED=false\\n")
+                  ge.write("CHANGED=false\n")
 
       - name: Commit and Push Changes
         if: env.CHANGED == 'true'
